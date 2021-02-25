@@ -598,5 +598,5 @@ static int unlink_socket(struct program * prog)
 
 static void usage(struct program * prog)
   {
-    fprintf(stderr, "Usage:\n\nClient mode: %s --client <socketpath> [program [args]]\nReceive namespace FDs and execv to [program] with [args]\n\nServer mode: %s --server <socketpath>\nWait for connection from client and then send namespace FDs", prog->name, prog->name);
+    fprintf(stderr, "Usage:\n\nClient mode: %s --client <socketpath> [program [args]]\nReceive namespace FDs and execv to [program] with [args]\n\nServer mode: %s --server <socketpath>\nWait for connection from client and then send namespace FDs\n", prog->name, prog->name);
   }
