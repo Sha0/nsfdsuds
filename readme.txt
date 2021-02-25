@@ -81,7 +81,7 @@ server-mode:
 
 And that the privileged container uses nsfdsuds in client-mode:
 
-  # ./nsfdsuds --client /shared/nsfdsuds.socket /bin/sh
+  # ./nsfdsuds --client /shared/nsfdsuds.socket /bin/busybox sh
 
 The non-privileged container should pass its namespace file-descriptors across
 the socket-file on the shared mount-point to the privileged container, who
