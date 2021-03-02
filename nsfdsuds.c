@@ -507,10 +507,14 @@ static int server_mode(struct program * prog)
       {
         strcpy(path, ns_path);
         strcat(path, ns_types[nsi]);
+        pe = errno;
+        errno = 0;
         prog->nsfds[nsi] = open(path, O_RDONLY);
+        e = errno;
+        errno = pe;
         if (prog->nsfds[nsi] == -1)
           {
-            fprintf(stderr, "Error opening: %s\n", path);
+            fprintf(stderr, "Error %d while opening '%s': %s\n", e, path, strerror(e));
             goto err_fds;
           }
       }
