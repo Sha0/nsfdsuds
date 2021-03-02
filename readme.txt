@@ -1,8 +1,6 @@
 Author: Shao Miller <code@sha0.net>
 Date: 2021-02-23
 
-TODO: Expand upon this documentation with a specific tutorial.
-
 NameSpace File-DescriptorS over a Unix Domain Socket.
 
 Docker and Kubernetes are great technologies that enable many possibilities.
@@ -19,81 +17,139 @@ might then set about working upon a migration-strategy, but the aforementioned
 obstacle should be obvious very early on.  The source-code in this project is
 part of an attempt to [painfully] work around the obstacle.
 
-Suppose one has the following StatefulSet:
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: nsfdsuds
-  namespace: nsfdsuds
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nsfdsuds
-  serviceName: nsfdsuds
-  template:
-    metadata:
-      labels:
-        app: nsfdsuds
-    spec:
-      containers:
-      - args:
-        - -c
-        - while true; do sleep 60; done
-        command:
-        - /bin/sh
-        image: busybox
+Included in this source-code is a demonstration of such a work-around by using
+nsfdsuds.  After installing a statically-linkable GLibC, the nsfdsuds command
+can be built with the -static flag to GCC:
+
+  gcc -static -ansi -pedantic -Wall -Wextra -Werror -o nsfdsuds nsfdsuds.c
+
+The demonstration uses BusyBox, else a static build wouldn't be as important.
+
+The Dockerfile can be used to build a BusyBox image that includes nsfdsuds:
+
+  docker build .
+
+For the demonstration, this image has already been "pushed" to Docker Hub.
+
+The mkyaml.sh script can be used to generate some Kubernetes YAML.  The
+kubectl command is required.
+
+  ./mkyaml.sh > demo.yaml
+
+This YAML can then be deployed:
+
+  kubectl -n <namespace> apply -f demo.yaml
+
+The result is a StatefulSet which creates a pod with two containers:
+- A non-privileged container
+- A privileged container
+
+These containers share a common mount-point: /exclude/shared/
+
+The non-privileged container will use nsfdsuds in "server mode" and it will
+listen on the /exclude/shared/nsfdsuds.socket socket-file.  The privileged
+container will connect to the same socket-file and attempt to receive file-
+descriptors for some of the namespaces from the non-privileged container.
+These scripts are nonpriv.sh and priv.sh, respectively.
+
+Once the privileged container has the NS FDs, it will execute the nsenter.sh
+script, which finds the mount NS for the non-privileged container and then
+executes the overlay.sh script in that namespace.  This latter will establish:
+- /exclude/lowerdir/         : A "lower dir"
+- /exclude/overlay/upperdir/ : An "upper dir"
+- /exclude/overlay/workdir/  : A "work dir"
+- /exclude/newroot/          : An overlayfs composed of these
+
+In "real life" (outside of this demonstration), the "lower dir" would most
+likely be a pod-mounted volume to some read-only, base filesystem image.  In
+that case, the noted line in overlay.sh would be removed.  For the sake of
+completeness, this demonstration simply bind-mounts the BusyBox image to the
+"lower dir" to pretend that a full OS image is present, there.
+
+Also in "real life," the /exclude/overlay/ directory would most likely be a
+pod-mounted volume: where the persistent data is desired to be.  In this
+demonstration, an emptyDir volume is used, so there won't actually be any
+persistence across restarts.  Simply replace the emptyDir volume with a
+persistent volume in order to enjoy real persistence.
+
+After establishing the overlayfs, the overlay.sh script then invokes the
+remount.sh script, which will bind-mount the many mount-points that were
+established by Kubernetes and Docker, including /dev/ and /sys/ and so on.
+These new mount-points will be in the overlayfs, at which point the overlayfs
+will be suitably-prepared for a chroot operation.
+
+The final work of the privileged container's overlay.sh script is to create a
+"ready file" to note the completion of work.
+
+Back in the non-privileged container, it has been waiting for this "ready
+file" to exist.  Once the file is found, this container's nonpriv.sh script
+will exec and chroot into the overlayfs established by the privileged
+container.  In "real life" and for a full OS image at the overlayfs, this
+would likely invoke /sbin/init instead of the simple init.sh script of the
+demonstration.
+
+In summary, the non-privileged container and the privileged container use
+nsfdsuds to allow the privileged container to manipulate the mount-points of
+the non-privileged container, set up an overlayfs and other important
+mount-points, then the non-privileged container gives up its "old" root FS
+space and uses the overlayfs.
+
+One will notice, however, that using kubectl like this:
+
+  kubectl -n namespace exec -it nsfdsuds-0 -c busybox-nonpriv -- /bin/sh
+
+will result in a shell in the "old" root FS of the non-privileged container.
+If one wishes to enter the overlayfs environment, one would then:
+
+  exec chroot /path/to/newroot/
+
+BONUS DOCUMENTATION
+
+1. A previous iteration of this documentation included the following portions
+of the StatefulSet:
+[...]
         name: busybox-priv
-        resources: {}
-        securityContext:
-          privileged: true
+[...]
         volumeMounts:
         - mountPath: /shared
           mountPropagation: Bidirectional
           name: shared
-      - args:
-        - -c
-        - while true; do sleep 60; done
-        command:
-        - /bin/sh
-        image: busybox
+[...]
         name: busybox
-        resources: {}
+[...]
         volumeMounts:
         - mountPath: /shared
           mountPropagation: HostToContainer
           name: shared
-      volumes:
-      - emptyDir: {}
-        name: shared
----
+[...]
 
-There is a privileged container and a non-privileged container.  They share a
-common /shared mount-point and the mount-propagation specification allows for
-manipulations of that mount-point within the privileged container to be
-observable by the non-privileged container.
+The idea for this is that the privileged container can manipulate the shared
+mount-point and those manipulations will be accessible by the non-privileged
+container.  Although an overlayfs could certainly be established in this way,
+it doesn't gain much because the privileged container still needs to bind-
+mount the many mount-points established by Kubernetes and Docker, for which it
+will step inside the mount namespace of the non-privileged container, anyway.
 
-Further suppose that the non-privileged container uses nsfdsuds in
-server-mode:
+2. During development of the demonstration, this error was encountered:
 
-  # ./nsfdsuds --server /shared/nsfdsuds.socket
+  $ kubectl -n namespace exec -it nsfdsuds-0 -c busybox-nonpriv -- /bin/sh
+  OCI runtime exec failed: exec failed: container_linux.go:370: starting
+  container process caused: read init-p: connection reset by peer: unknown
+  command terminated with exit code 126
 
-And that the privileged container uses nsfdsuds in client-mode:
+There was also a related Docker-log on the node:
 
-  # ./nsfdsuds --client /shared/nsfdsuds.socket /bin/busybox sh
+  $ journalctl -xeu docker
+  [...]
+  [...] level=error msg="stream copy error: reading from a closed fifo"
+  [...]
 
-The non-privileged container should pass its namespace file-descriptors across
-the socket-file on the shared mount-point to the privileged container, who
-will then execv to /bin/sh and retain these FDs.  From that point, the
-privileged container may be able to use the nsenter utility (or setns
-system-call) with these FDs to manipulate mount-points within the non-
-privileged container, such as:
+The cause was an accidental bind-mount of the / directory onto the / directory
+(again) inside the non-privileged container.  Doing so made the many mount-
+points established by Kubernetes and Docker inaccessible to whichever agent
+was trying to establish a new command inside the container.
 
-- Establishing an overlayfs with a persistent top layer
+FINAL THOUGHT
 
-- Re-mounting / binding / moving mount-points established by the wonderful
-Kubernetes + Docker combination into this overlayfs
-
-- Informing the non-privileged container that it's time to chroot into the
-newly-established overlayfs
+If you enjoy this work, it would be great to express your enjoyment by sharing
+it with others who might have similar goals.
